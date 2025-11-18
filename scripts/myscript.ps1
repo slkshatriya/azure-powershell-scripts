@@ -17,7 +17,7 @@ try {
         OriginalMessage = $InputMessage
         ProcessedMessage = $processedData
         ExecutionTime = Get-Date
-        Environment = $Environment
+        Environments = $Environment
     }
     
     Write-Output "Processing completed successfully"
