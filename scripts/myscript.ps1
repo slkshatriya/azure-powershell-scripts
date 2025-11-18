@@ -27,7 +27,6 @@ try {
             Time = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         }
         
-        #Write-Output "Drive $($_.DeviceID): $freeSpaceGB GB free of $totalSpaceGB GB ($freeSpacePercent%) - $status"
     }
     
     # Return as JSON
