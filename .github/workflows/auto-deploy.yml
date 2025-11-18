@@ -1,203 +1,61 @@
-name: Deploy and Publish to Azure (Managed Identity - COMPLETE)
+name: Deploy with PowerShell (Most Reliable)
 
 on:
   push:
     branches: [ main ]
     paths: [ 'scripts/**' ]
-  workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     
-    - name: Get Azure Access Token (Managed Identity)
-      id: get_token
+    - name: Deploy using PowerShell
+      shell: pwsh
       run: |
-        echo "🔐 Getting fresh access token..."
+        Write-Host "🚀 Deploying with PowerShell..." -ForegroundColor Green
         
-        # Get token using your managed identity credentials
-        TOKEN=$(curl -s -X POST \
-          "https://login.microsoftonline.com/${{ secrets.AZURE_TENANT_ID }}/oauth2/v2.0/token" \
-          -H "Content-Type: application/x-www-form-urlencoded" \
-          -d "client_id=16c866e9-f2ee-472f-ae80-006543691b2d&scope=https://management.azure.com/.default&grant_type=client_credentials&client_secret=PLACEHOLDER" \
-          | jq -r '.access_token' 2>/dev/null || echo "")
+        # Install required modules
+        Install-Module -Name Az.Automation -Force -Scope CurrentUser
+        Import-Module Az.Automation
         
-        if [[ -z "$TOKEN" || "$TOKEN" == "null" ]]; then
-          echo "⚠️ Token request failed, using stored token"
-          TOKEN="${{ secrets.AZURE_ACCESS_TOKEN }}"
-        fi
+        $subscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+        $resourceGroup = "${{ secrets.AZURE_RESOURCE_GROUP }}"
+        $automationAccount = "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
+        $accessToken = "${{ secrets.AZURE_ACCESS_TOKEN }}"
         
-        echo "TOKEN=$TOKEN" >> $GITHUB_OUTPUT
-        echo "✅ Token ready"
-    
-    - name: Complete Deployment with REST API
-      run: |
-        echo "🚀 Starting COMPLETE deployment using REST API..."
+        # Create auth context
+        $context = [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AzureRmProfileProvider]::Instance.Profile.DefaultContext
+        $context.Account.SetProperty("AccessToken", $accessToken)
         
-        TOKEN="${{ steps.get_token.outputs.TOKEN }}"
-        SUBSCRIPTION_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-        RESOURCE_GROUP="${{ secrets.AZURE_RESOURCE_GROUP }}"
-        AUTOMATION_ACCOUNT="${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
+        Get-ChildItem -Path "scripts/*.ps1" | ForEach-Object {
+            $runbookName = $_.BaseName
+            $scriptPath = $_.FullName
+            
+            Write-Host "📦 Processing: $runbookName" -ForegroundColor Yellow
+            
+            try {
+                # Remove existing runbook
+                Write-Host "   🗑️ Removing existing..." -ForegroundColor Cyan
+                Remove-AzAutomationRunbook -AutomationAccountName $automationAccount -ResourceGroupName $resourceGroup -Name $runbookName -Force -ErrorAction SilentlyContinue
+                Start-Sleep 3
+                
+                # Import new runbook
+                Write-Host "   📤 Importing new runbook..." -ForegroundColor Cyan
+                Import-AzAutomationRunbook -AutomationAccountName $automationAccount -ResourceGroupName $resourceGroup -Name $runbookName -Type PowerShell -Path $scriptPath -Description "GitHub deployed"
+                Start-Sleep 5
+                
+                # Publish runbook
+                Write-Host "   📢 Publishing..." -ForegroundColor Cyan
+                Publish-AzAutomationRunbook -AutomationAccountName $automationAccount -ResourceGroupName $resourceGroup -Name $runbookName
+                
+                Write-Host "   ✅ SUCCESS: $runbookName is published!" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "   ❌ ERROR: $($_.Exception.Message)" -ForegroundColor Red
+            }
+        }
         
-        success_count=0
-        total_files=0
-        
-        echo "🎯 Target: $AUTOMATION_ACCOUNT in $RESOURCE_GROUP"
-        echo ""
-        
-        for script_file in scripts/*.ps1; do
-          if [[ -f "$script_file" ]]; then
-            total_files=$((total_files + 1))
-            runbook_name=$(basename "$script_file" .ps1)
-            
-            echo "📦 [$total_files] Processing: $runbook_name"
-            
-            # STEP 1: Delete existing runbook completely
-            echo "   🗑️ Deleting existing runbook..."
-            delete_response=$(curl -s -w "%{http_code}" -X DELETE \
-              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN")
-            
-            delete_status="${delete_response: -3}"
-            echo "   Delete status: $delete_status"
-            
-            # Wait for deletion to complete
-            sleep 5
-            
-            # STEP 2: Create fresh runbook
-            echo "   🆕 Creating fresh runbook..."
-            create_response=$(curl -s -w "%{http_code}" -X PUT \
-              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{
-                \"properties\": {
-                  \"runbookType\": \"PowerShell\",
-                  \"description\": \"GitHub auto-deployed $(date) - Commit: ${GITHUB_SHA:0:7}\"
-                },
-                \"location\": \"East US\"
-              }")
-            
-            create_status="${create_response: -3}"
-            echo "   Create status: $create_status"
-            
-            if [[ "$create_status" != "200" && "$create_status" != "201" ]]; then
-              echo "   ❌ Create failed, skipping..."
-              continue
-            fi
-            
-            # Wait for runbook to be ready
-            sleep 5
-            
-            # STEP 3: Upload content
-            echo "   📤 Uploading script content..."
-            content_length=$(wc -c < "$script_file")
-            
-            upload_response=$(curl -s -w "%{http_code}" -X PUT \
-              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name/draft/content?api-version=2015-10-31" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: text/powershell" \
-              -H "Content-Length: $content_length" \
-              --data-binary "@$script_file")
-            
-            upload_status="${upload_response: -3}"
-            echo "   Upload status: $upload_status"
-            
-            if [[ "$upload_status" != "200" && "$upload_status" != "202" ]]; then
-              echo "   ❌ Upload failed, skipping..."
-              continue
-            fi
-            
-            # Wait for content to be processed
-            sleep 8
-            
-            # STEP 4: Publish with multiple attempts
-            echo "   📢 Publishing runbook..."
-            published=false
-            
-            for attempt in 1 2 3; do
-              echo "   🔄 Publish attempt $attempt/3..."
-              
-              publish_response=$(curl -s -w "%{http_code}" -X POST \
-                "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name/publish?api-version=2015-10-31" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Length: 0")
-              
-              publish_status="${publish_response: -3}"
-              echo "   Publish status: $publish_status"
-              
-              if [[ "$publish_status" == "200" || "$publish_status" == "202" ]]; then
-                echo "   🎉 PUBLISHED SUCCESSFULLY!"
-                published=true
-                success_count=$((success_count + 1))
-                break
-              else
-                echo "   ⚠️ Attempt $attempt failed"
-                if [[ $attempt -lt 3 ]]; then
-                  echo "   ⏳ Waiting 15 seconds..."
-                  sleep 15
-                fi
-              fi
-            done
-            
-            if [[ "$published" == false ]]; then
-              echo "   ❌ All publish attempts failed"
-            fi
-            
-            # STEP 5: Verify final state
-            echo "   🔍 Verifying state..."
-            sleep 3
-            
-            verify_response=$(curl -s \
-              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN")
-            
-            final_state=$(echo "$verify_response" | jq -r '.properties.state' 2>/dev/null || echo "Unknown")
-            echo "   📊 Final state: $final_state"
-            
-            if [[ "$final_state" == "Published" ]]; then
-              echo "   ✅ SUCCESS: $runbook_name is LIVE!"
-            else
-              echo "   ⚠️ PARTIAL: $runbook_name uploaded but not published"
-            fi
-            
-            echo ""
-          fi
-        done
-        
-        echo "🎯 ===== FINAL RESULTS ====="
-        echo "📁 Scripts processed: $total_files"
-        echo "🎉 Auto-published: $success_count"
-        echo "📋 Manual publish needed: $((total_files - success_count))"
-        
-        if [[ $success_count -eq $total_files && $total_files -gt 0 ]]; then
-          echo ""
-          echo "✅ PERFECT! All scripts deployed and published!"
-          echo "🚀 Ready for Logic App immediately!"
-        elif [[ $success_count -gt 0 ]]; then
-          echo ""
-          echo "✅ PARTIAL SUCCESS! $success_count scripts are live."
-          echo "📋 Remaining scripts need manual publish in Azure Portal"
-        else
-          echo ""
-          echo "📤 Scripts uploaded but auto-publish failed"
-          echo "📋 Manual publish required: Azure Portal → Automation Account → Runbooks"
-        fi
-    
-    - name: Final Verification
-      run: |
-        echo "🔍 Final runbook verification..."
-        
-        TOKEN="${{ steps.get_token.outputs.TOKEN }}"
-        
-        # List all runbooks
-        runbooks_response=$(curl -s \
-          "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks?api-version=2020-01-13-preview" \
-          -H "Authorization: Bearer $TOKEN")
-        
-        echo "📋 Current runbooks:"
-        echo "$runbooks_response" | jq -r '.value[] | "   \(.name): \(.properties.state)"' 2>/dev/null || echo "   Verification failed - check manually"
+        Write-Host "🎉 Deployment completed!" -ForegroundColor Green
