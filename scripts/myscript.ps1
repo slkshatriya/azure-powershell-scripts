@@ -15,7 +15,7 @@ try {
     $result = @{
         Status = "Success"
         OriginalMessage = $InputMessage
-        ProcessedMessage = $processedData
+        ProcessedMessages = $processedData
         ExecutionTime = Get-Date
         Environments = $Environment
     }
