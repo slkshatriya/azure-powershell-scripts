@@ -1,176 +1,59 @@
-name: Deploy Scripts (Complete Fixed Version)
+name: Deploy with PowerShell Module
 
 on:
   push:
     branches: [ main ]
     paths: [ 'scripts/**' ]
-  workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     
     steps:
     - uses: actions/checkout@v4
     
-    - name: Deploy Scripts (Complete Process)
+    - name: Install Azure PowerShell
+      shell: pwsh
       run: |
-        echo "🚀 Deploying scripts by mimicking manual Azure Portal process..."
+        Install-Module -Name Az -Force -Scope CurrentUser -AllowClobber
+        Import-Module Az
+    
+    - name: Connect to Azure
+      shell: pwsh
+      run: |
+        # Create credential object from access token
+        $accessToken = "${{ secrets.AZURE_ACCESS_TOKEN }}"
+        $subscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
         
-        TOKEN="${{ secrets.AZURE_ACCESS_TOKEN }}"
-        SUB="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-        RG="${{ secrets.AZURE_RESOURCE_GROUP }}"
-        AA="${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
+        # Connect using access token
+        Connect-AzAccount -AccessToken $accessToken -SubscriptionId $subscriptionId -AccountId "automation@github.com"
         
-        BASE_URL="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Automation/automationAccounts/$AA"
+        Write-Host "✅ Connected to Azure"
+    
+    - name: Deploy Scripts
+      shell: pwsh
+      run: |
+        Write-Host "🚀 Deploying scripts..."
         
-        success_count=0
-        total_count=0
+        $resourceGroup = "${{ secrets.AZURE_RESOURCE_GROUP }}"
+        $automationAccount = "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
         
-        for script in scripts/*.ps1; do
-          if [[ -f "$script" ]]; then
-            total_count=$((total_count + 1))
-            name=$(basename "$script" .ps1)
-            echo ""
-            echo "📦 Processing: $name"
+        Get-ChildItem -Path "scripts/*.ps1" | ForEach-Object {
+            $runbookName = $_.BaseName
+            $scriptPath = $_.FullName
             
-            # Step 1: Delete existing runbook
-            echo "   🗑️ Deleting existing runbook..."
-            curl -s -X DELETE "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1
-            sleep 3
+            Write-Host "📦 Processing: $runbookName"
             
-            # Step 2: Create new runbook
-            echo "   🆕 Creating new runbook..."
-            curl -s -X PUT "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "properties": {
-                  "runbookType": "PowerShell",
-                  "description": "GitHub Auto-Deploy"
-                },
-                "location": "East US"
-              }' >/dev/null
-            sleep 5
-            
-            # Step 3: Upload content to draft
-            echo "   📝 Opening editor and adding content..."
-            curl -s -X PUT "$BASE_URL/runbooks/$name/draft/content?api-version=2015-10-31" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: text/powershell" \
-              --data-binary "@$script" >/dev/null
-            sleep 3
-            
-            # Step 4: Simulate "Save" action
-            echo "   💾 Saving draft..."
-            curl -s -X PUT "$BASE_URL/runbooks/$name/draft?api-version=2015-10-31" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "properties": {
-                  "description": "Draft saved from GitHub",
-                  "logVerbose": false,
-                  "logProgress": false
-                }
-              }' >/dev/null 2>&1
-            sleep 5
-            
-            # Step 5: Update runbook properties
-            echo "   🔄 Updating runbook properties..."
-            curl -s -X PATCH "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "properties": {
-                  "description": "Ready for publish - GitHub deployed"
-                }
-              }' >/dev/null
-            sleep 3
-            
-            # Step 6: Check state
-            echo "   🔍 Checking state..."
-            state_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN")
-            current_state=$(echo "$state_response" | grep -o '"state":"[^"]*"' | cut -d'"' -f4)
-            echo "   📊 Current state: $current_state"
-            
-            # Step 7: Try alternative if still "New"
-            if [[ "$current_state" == "New" ]]; then
-              echo "   🔧 Still in New state, trying test job approach..."
-              
-              curl -s -X PUT "$BASE_URL/runbooks/$name/draft/testJob?api-version=2015-10-31" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Type: application/json" \
-                -d '{"properties": {"parameters": {}}}' >/dev/null 2>&1
-              sleep 2
-              
-              curl -s -X POST "$BASE_URL/runbooks/$name/draft/testJob/stop?api-version=2015-10-31" \
-                -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1
-              sleep 3
-              
-              state_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
-                -H "Authorization: Bearer $TOKEN")
-              current_state=$(echo "$state_response" | grep -o '"state":"[^"]*"' | cut -d'"' -f4)
-              echo "   📊 State after test job: $current_state"
-            fi
-            
-            # Step 8: Attempt to publish
-            echo "   📢 Attempting to publish..."
-            
-            for attempt in 1 2 3; do
-              echo "   🔄 Publish attempt $attempt/3..."
-              
-              publish_response=$(curl -s -w "%{http_code}" -X POST \
-                "$BASE_URL/runbooks/$name/publish?api-version=2015-10-31" \
-                -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Length: 0")
-              
-              publish_status="${publish_response: -3}"
-              
-              if [[ "$publish_status" == "200" || "$publish_status" == "202" ]]; then
-                echo "   🎉 PUBLISHED SUCCESSFULLY!"
-                success_count=$((success_count + 1))
-                break
-              else
-                echo "   ⚠️ Publish failed: HTTP $publish_status"
-                if [[ $attempt -lt 3 ]]; then
-                  sleep 10
-                fi
-              fi
-            done
-            
-            # Step 9: Final verification
-            echo "   🔍 Final verification..."
-            sleep 3
-            final_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN")
-            final_state=$(echo "$final_response" | grep -o '"state":"[^"]*"' | cut -d'"' -f4)
-            
-            echo "   📋 Final state: $final_state"
-            
-            if [[ "$final_state" == "Published" ]]; then
-              echo "   ✅ SUCCESS: $name is PUBLISHED and ready!"
-            else
-              echo "   ⚠️ Content uploaded - manual publish needed"
-            fi
-          fi
-        done
-        
-        echo ""
-        echo "🎯 ===== DEPLOYMENT SUMMARY ====="
-        echo "📁 Total scripts: $total_count"
-        echo "🎉 Auto-published: $success_count"
-        echo "📋 Manual publish needed: $((total_count - success_count))"
-        
-        if [[ $success_count -eq $total_count && $total_count -gt 0 ]]; then
-          echo ""
-          echo "🎊 PERFECT! All scripts are published and ready!"
-        else
-          echo ""
-          echo "📤 Scripts uploaded successfully!"
-          echo "📋 Manual publish steps:"
-          echo "1. Go to Azure Portal → Automation Accounts → $AA → Runbooks"
-          echo "2. Click on runbook → Click 'Publish' → Click 'Yes'"
-          echo "3. Done! Ready for Logic App use"
-        fi
+            try {
+                # Remove existing
+                Remove-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Force -ErrorAction SilentlyContinue
+                
+                # Import and publish
+                Import-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Type PowerShell -Path $scriptPath -Published
+                
+                Write-Host "✅ SUCCESS: $runbookName published!"
+            }
+            catch {
+                Write-Host "❌ Failed: $($_.Exception.Message)"
+            }
+        }
