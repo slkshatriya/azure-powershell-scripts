@@ -28,12 +28,12 @@ jobs:
         # Connect using access token
         Connect-AzAccount -AccessToken $accessToken -SubscriptionId $subscriptionId -AccountId "automation@github.com"
         
-        Write-Host "✅ Connected to Azure"
+        Write-Host "Connected to Azure"
     
     - name: Deploy Scripts
       shell: pwsh
       run: |
-        Write-Host "🚀 Deploying scripts..."
+        Write-Host "Deploying scripts..."
         
         $resourceGroup = "${{ secrets.AZURE_RESOURCE_GROUP }}"
         $automationAccount = "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
@@ -42,7 +42,7 @@ jobs:
             $runbookName = $_.BaseName
             $scriptPath = $_.FullName
             
-            Write-Host "📦 Processing: $runbookName"
+            Write-Host "Processing: $runbookName"
             
             try {
                 # Remove existing
@@ -51,9 +51,9 @@ jobs:
                 # Import and publish
                 Import-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Type PowerShell -Path $scriptPath -Published
                 
-                Write-Host "✅ SUCCESS: $runbookName published!"
+                Write-Host "SUCCESS: $runbookName published!"
             }
             catch {
-                Write-Host "❌ Failed: $($_.Exception.Message)"
+                Write-Host "Failed: $($_.Exception.Message)"
             }
         }
