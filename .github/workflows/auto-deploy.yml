@@ -1,4 +1,4 @@
-name: Auto Deploy and Publish to Azure
+name: Auto Deploy with Debug Info
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     - name: Install Azure CLI
       run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
     
-    - name: Deploy and Publish Scripts
+    - name: Deploy Scripts with Detailed Logging
       run: |
         echo "🚀 Deploying scripts to Azure..."
         
@@ -23,6 +23,11 @@ jobs:
           if [[ -f "$script_file" ]]; then
             runbook_name=$(basename "$script_file" .ps1)
             echo "📦 Processing: $runbook_name"
+            
+            # Show script content for verification
+            echo "📄 Script content preview (first 3 lines):"
+            head -3 "$script_file" | sed 's/^/    /'
+            echo ""
             
             # Step 1: Create/Update runbook
             echo "  Creating runbook..."
@@ -32,48 +37,68 @@ jobs:
               --body '{
                 "properties": {
                   "runbookType": "PowerShell",
-                  "description": "Auto-deployed from GitHub"
+                  "description": "Auto-deployed from GitHub with debug info"
                 },
                 "location": "East US"
               }')
             
             echo "  ✅ Runbook created/updated"
             
-            # Step 2: Upload content
+            # Step 2: Upload content with detailed response
             echo "  Uploading script content..."
             sleep 2
             
             upload_result=$(az rest --method PUT \
               --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/draft/content?api-version=2015-10-31" \
               --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" "Content-Type=text/powershell" \
-              --body "@${script_file}")
+              --body "@${script_file}" \
+              --output json 2>&1)
             
-            echo "  ✅ Content uploaded"
+            echo "  Upload result: $upload_result"
+            echo "  ✅ Content upload attempted"
             
-            # Step 3: Publish runbook (AUTO-PUBLISH)
-            echo "  Publishing runbook..."
+            # Step 3: Check draft content exists before publishing
+            echo "  Checking draft content..."
             sleep 3
+            
+            draft_check=$(az rest --method GET \
+              --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/draft/content?api-version=2015-10-31" \
+              --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
+              2>/dev/null | head -2 || echo "Draft content check failed")
+            
+            echo "  Draft content preview: $draft_check"
+            
+            # Step 4: Try to publish with detailed error handling
+            echo "  Publishing runbook..."
             
             publish_result=$(az rest --method POST \
               --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/publish?api-version=2015-10-31" \
-              --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" "Content-Length=0" \
-              2>/dev/null || echo "  ⚠️ Auto-publish may have failed - check manually")
+              --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
+              --output json 2>&1)
             
-            echo "  ✅ Runbook published automatically"
-            echo "  🎉 Deployment completed: $runbook_name"
+            echo "  Publish result: $publish_result"
+            
+            # Step 5: Verify final state
+            echo "  Verifying final state..."
+            sleep 2
+            
+            final_state=$(az rest --method GET \
+              --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}?api-version=2020-01-13-preview" \
+              --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
+              --query "properties.state" \
+              --output tsv 2>/dev/null || echo "State check failed")
+            
+            echo "  Final state: $final_state"
+            
+            if [[ "$final_state" == "Published" ]]; then
+              echo "  🎉 SUCCESS: Runbook is now PUBLISHED"
+            else
+              echo "  ⚠️  WARNING: Runbook state is: $final_state"
+              echo "  📋 Manual publish needed in Azure Portal"
+            fi
+            
             echo ""
           fi
         done
         
-        echo "🎉 All scripts deployed and published!"
-        
-    - name: Verify Deployment
-      run: |
-        echo "🔍 Verifying deployed runbooks..."
-        
-        # List all runbooks to verify they exist and are published
-        az rest --method GET \
-          --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks?api-version=2020-01-13-preview" \
-          --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
-          --query "value[?contains(name,'myscript')].{Name:name,State:properties.state,LastModified:properties.lastModifiedTime}" \
-          --output table 2>/dev/null || echo "📋 Manual verification needed in Azure Portal"
+        echo "🎉 Processing completed!"
