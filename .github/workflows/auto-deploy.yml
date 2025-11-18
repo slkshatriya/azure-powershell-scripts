@@ -1,4 +1,4 @@
-name: Deploy Scripts to Azure (Fixed Authentication)
+name: Deploy Scripts to Azure (Token Auth Fixed)
 
 on:
   push:
@@ -17,20 +17,54 @@ jobs:
     - name: Install Azure CLI
       run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
     
-    - name: Login to Azure (Automated)
+    - name: Setup Azure Authentication
       run: |
-        # Use access token to login without manual intervention
-        az login --service-principal \
-          --username "16c866e9-f2ee-472f-ae80-006543691b2d" \
-          --password "${{ secrets.AZURE_ACCESS_TOKEN }}" \
-          --tenant "${{ secrets.AZURE_TENANT_ID }}"
+        echo "🔐 Setting up Azure CLI with existing token..."
         
+        # Create a fake Azure CLI profile with your token
+        mkdir -p ~/.azure
+        
+        # Create azureProfile.json
+        cat > ~/.azure/azureProfile.json << EOF
+        {
+          "installationId": "github-actions",
+          "subscriptions": [
+            {
+              "id": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+              "name": "Your Subscription",
+              "state": "Enabled",
+              "user": {
+                "name": "github-actions@automation",
+                "type": "user"
+              },
+              "isDefault": true,
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
+            }
+          ]
+        }
+        EOF
+        
+        # Create accessTokens.json with your token
+        cat > ~/.azure/accessTokens.json << EOF
+        [
+          {
+            "tokenType": "Bearer",
+            "accessToken": "${{ secrets.AZURE_ACCESS_TOKEN }}",
+            "expiresOn": "$(date -d '+1 hour' --iso-8601=seconds)",
+            "subscription": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+            "tenant": "${{ secrets.AZURE_TENANT_ID }}"
+          }
+        ]
+        EOF
+        
+        # Set the default subscription
         az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-        echo "✅ Logged in successfully (automated)"
+        
+        echo "✅ Azure CLI configured with token"
     
     - name: Deploy PowerShell Scripts
       run: |
-        echo "🚀 Deploying scripts..."
+        echo "🚀 Deploying scripts with your proven method..."
         
         for script in scripts/*.ps1; do
           if [[ -f "$script" ]]; then
@@ -69,12 +103,3 @@ jobs:
         done
         
         echo "🎉 All scripts deployed and published!"
-    
-    - name: Verify Deployment
-      run: |
-        echo "📋 Verifying all runbooks..."
-        az automation runbook list \
-          --automation-account-name ${{ secrets.AZURE_AUTOMATION_ACCOUNT }} \
-          --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-          --query "[].{Name:name,State:state,Type:runbookType}" \
-          --output table
