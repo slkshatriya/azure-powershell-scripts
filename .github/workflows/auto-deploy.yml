@@ -22,7 +22,7 @@ jobs:
             runbook_name=$(basename "$script_file" .ps1)
             echo "Deploying: $runbook_name"
             
-            # Step 1: Create runbook (with location)
+            # Step 1: Create runbook
             echo "  Creating runbook..."
             create_response=$(curl -w "%{http_code}" -s -X PUT \
               "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}?api-version=2020-01-13-preview" \
@@ -38,7 +38,16 @@ jobs:
             
             echo "  Create response: ${create_response: -3}"
             
-            # Step 2: Upload script content (with proper headers)
+            if [[ "${create_response: -3}" != "200" && "${create_response: -3}" != "201" ]]; then
+              echo "Failed to create runbook, skipping..."
+              continue
+            fi
+            
+            # Wait for runbook to be ready
+            echo "  Waiting for runbook to be ready..."
+            sleep 3
+            
+            # Step 2: Upload script content
             echo "  Uploading content..."
             content_length=$(wc -c < "$script_file")
             upload_response=$(curl -w "%{http_code}" -s -X PUT \
@@ -50,6 +59,15 @@ jobs:
             
             echo "  Upload response: ${upload_response: -3}"
             
+            if [[ "${upload_response: -3}" != "200" && "${upload_response: -3}" != "202" ]]; then
+              echo "Failed to upload content, skipping publish..."
+              continue
+            fi
+            
+            # Wait for content to be processed
+            echo "  Waiting for content to be processed..."
+            sleep 5
+            
             # Step 3: Publish runbook
             echo "  Publishing..."
             publish_response=$(curl -w "%{http_code}" -s -X POST \
@@ -58,8 +76,29 @@ jobs:
               -H "Content-Length: 0")
             
             echo "  Publish response: ${publish_response: -3}"
-            echo "Completed: $runbook_name"
+            
+            if [[ "${publish_response: -3}" == "200" || "${publish_response: -3}" == "202" ]]; then
+              echo "Successfully deployed: $runbook_name"
+            else
+              echo "Published with status: ${publish_response: -3}"
+            fi
+            
+            echo "  Completed: $runbook_name"
           fi
         done
         
-        echo "All scripts deployed!"
+        echo "All scripts processed!"
+    
+    - name: Verify Deployment
+      run: |
+        echo "Verifying deployment..."
+        
+        # List runbooks to verify they exist
+        curl -s \
+          "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks?api-version=2020-01-13-preview" \
+          -H "Authorization: Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" | \
+          grep -o '"name":"[^"]*"' | \
+          sed 's/"name":"//g' | sed 's/"//g' | \
+          while read runbook; do
+            echo "Found runbook: $runbook"
+          done
