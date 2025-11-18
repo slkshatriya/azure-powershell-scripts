@@ -25,32 +25,32 @@ jobs:
       if: steps.cache-azmodule.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
-        Write-Host "🔧 First-time setup (cached for future runs)..."
+        Write-Host "First-time setup (cached for future runs)..."
         Install-Module -Name Az.Accounts, Az.Automation -Force -Scope CurrentUser -AllowClobber
         Import-Module Az.Accounts, Az.Automation -Force
-        Write-Host "✅ Setup complete and cached"
+        Write-Host "Setup complete and cached"
     
     - name: Deploy Scripts (Skip Import if Cached)
       shell: pwsh
       run: |
         # Only import if modules aren't already loaded or cached
         if (-not (Get-Module Az.Automation)) {
-            Write-Host "📦 Loading cached modules..."
+            Write-Host "Loading cached modules..."
             Import-Module Az.Accounts, Az.Automation -Force
         } else {
-            Write-Host "✅ Modules already loaded"
+            Write-Host "Modules already loaded"
         }
         
-        Write-Host "🔐 Connecting to Azure..."
+        Write-Host "Connecting to Azure..."
         Connect-AzAccount -AccessToken "${{ secrets.AZURE_ACCESS_TOKEN }}" -SubscriptionId "${{ secrets.AZURE_SUBSCRIPTION_ID }}" -AccountId "automation@github.com"
         
-        Write-Host "🚀 Deploying scripts..."
+        Write-Host "Deploying scripts..."
         $resourceGroup = "${{ secrets.AZURE_RESOURCE_GROUP }}"
         $automationAccount = "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
         
         Get-ChildItem -Path "scripts/*.ps1" | ForEach-Object {
             $runbookName = $_.BaseName
-            Write-Host "📦 Processing: $runbookName"
+            Write-Host "Processing: $runbookName"
             
             Remove-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Force -ErrorAction SilentlyContinue
             Import-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Type PowerShell -Path $_.FullName -Published
