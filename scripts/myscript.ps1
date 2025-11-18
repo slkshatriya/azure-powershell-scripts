@@ -1,6 +1,6 @@
 param(
     [string]$InputMessage = "Default message",
-    [string]$Environment = "Production"
+    [string]$Environment = "UAT"
 )
 
 Write-Output "=== PowerShell Script Execution Started ==="
