@@ -1,10 +1,9 @@
-name: Deploy with PowerShell Module (Cached)
+name: Deploy (Minimal Module Loading)
 
 on:
   push:
     branches: [ main ]
     paths: [ 'scripts/**' ]
-  workflow_dispatch:
 
 jobs:
   deploy:
@@ -13,120 +12,50 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Cache Azure PowerShell Module
+    - name: Cache and Setup Azure PowerShell
       uses: actions/cache@v3
       id: cache-azmodule
       with:
         path: |
           C:\Users\runneradmin\Documents\PowerShell\Modules\Az*
           C:\Program Files\PowerShell\Modules\Az*
-        key: azure-powershell-${{ runner.os }}-v2
-        restore-keys: |
-          azure-powershell-${{ runner.os }}-
+        key: azure-powershell-${{ runner.os }}-v3
     
-    - name: Install Azure PowerShell (if not cached)
+    - name: One-Time Setup (Only if not cached)
       if: steps.cache-azmodule.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
-        Write-Host "Installing Azure PowerShell module (first time only)..."
-        Install-Module -Name Az -Force -Scope CurrentUser -AllowClobber
-        Write-Host "Azure PowerShell installed and cached"
+        Write-Host "🔧 First-time setup (cached for future runs)..."
+        Install-Module -Name Az.Accounts, Az.Automation -Force -Scope CurrentUser -AllowClobber
+        Import-Module Az.Accounts, Az.Automation -Force
+        Write-Host "✅ Setup complete and cached"
     
-    - name: Import Azure PowerShell
+    - name: Deploy Scripts (Skip Import if Cached)
       shell: pwsh
       run: |
-        Write-Host "Importing Azure PowerShell module..."
-        Import-Module Az -Force
-        Write-Host "Azure PowerShell ready"
-    
-    - name: Connect to Azure
-      shell: pwsh
-      run: |
-        Write-Host "Connecting to Azure..."
+        # Only import if modules aren't already loaded or cached
+        if (-not (Get-Module Az.Automation)) {
+            Write-Host "📦 Loading cached modules..."
+            Import-Module Az.Accounts, Az.Automation -Force
+        } else {
+            Write-Host "✅ Modules already loaded"
+        }
         
-        $accessToken = "${{ secrets.AZURE_ACCESS_TOKEN }}"
-        $subscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+        Write-Host "🔐 Connecting to Azure..."
+        Connect-AzAccount -AccessToken "${{ secrets.AZURE_ACCESS_TOKEN }}" -SubscriptionId "${{ secrets.AZURE_SUBSCRIPTION_ID }}" -AccountId "automation@github.com"
         
-        # Connect using access token
-        Connect-AzAccount -AccessToken $accessToken -SubscriptionId $subscriptionId -AccountId "automation@github.com"
-        
-        Write-Host "Connected to Azure successfully"
-    
-    - name: Deploy and Publish Scripts
-      shell: pwsh
-      run: |
-        Write-Host "Deploying and publishing scripts..." -ForegroundColor Green
-        
+        Write-Host "🚀 Deploying scripts..."
         $resourceGroup = "${{ secrets.AZURE_RESOURCE_GROUP }}"
         $automationAccount = "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
-        $successCount = 0
-        $totalCount = 0
         
         Get-ChildItem -Path "scripts/*.ps1" | ForEach-Object {
-            $totalCount++
             $runbookName = $_.BaseName
-            $scriptPath = $_.FullName
+            Write-Host "📦 Processing: $runbookName"
             
-            Write-Host ""
-            Write-Host "[$totalCount] Processing: $runbookName" -ForegroundColor Yellow
+            Remove-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Force -ErrorAction SilentlyContinue
+            Import-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Type PowerShell -Path $_.FullName -Published
             
-            try {
-                # Remove existing runbook
-                Write-Host "Removing existing runbook..." -ForegroundColor Cyan
-                Remove-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Force -ErrorAction SilentlyContinue
-                
-                # Import and publish in one step
-                Write-Host "Importing and publishing runbook..." -ForegroundColor Cyan
-                Import-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount -Name $runbookName -Type PowerShell -Path $scriptPath -Published
-                
-                Write-Host "SUCCESS: $runbookName published and ready!" -ForegroundColor Green
-                $successCount++
-            }
-            catch {
-                Write-Host "FAILED: $($_.Exception.Message)" -ForegroundColor Red
-            }
+            Write-Host "SUCCESS: $runbookName published!"
         }
         
-        Write-Host ""
-        Write-Host "===== DEPLOYMENT SUMMARY =====" -ForegroundColor Magenta
-        Write-Host "Total scripts: $totalCount" -ForegroundColor White
-        Write-Host "Successfully published: $successCount" -ForegroundColor Green
-        Write-Host "Failed: $($totalCount - $successCount)" -ForegroundColor Red
-        
-        if ($successCount -eq $totalCount -and $totalCount -gt 0) {
-            Write-Host ""
-            Write-Host "PERFECT! All scripts are PUBLISHED and LIVE!" -ForegroundColor Green
-            Write-Host "Your Logic App can use them immediately!" -ForegroundColor Green
-        } elseif ($successCount -gt 0) {
-            Write-Host ""
-            Write-Host "PARTIAL SUCCESS: $successCount/$totalCount published" -ForegroundColor Yellow
-        }
-        
-        Write-Host ""
-        Write-Host "Verify at: https://portal.azure.com" -ForegroundColor Cyan
-        Write-Host "Path: Automation Accounts → $automationAccount → Runbooks" -ForegroundColor Cyan
-    
-    - name: Verify Deployment
-      shell: pwsh
-      run: |
-        Write-Host "Verifying runbook states..." -ForegroundColor Green
-        
-        $resourceGroup = "${{ secrets.AZURE_RESOURCE_GROUP }}"
-        $automationAccount = "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
-        
-        try {
-            $runbooks = Get-AzAutomationRunbook -ResourceGroupName $resourceGroup -AutomationAccountName $automationAccount
-            
-            Write-Host ""
-            Write-Host "Current runbooks:" -ForegroundColor Cyan
-            Write-Host "Name`t`tState`t`tType" -ForegroundColor Gray
-            Write-Host "----`t`t-----`t`t----" -ForegroundColor Gray
-            
-            $runbooks | Where-Object { $_.Name -like "*myscript*" -or $_.RunbookType -eq "PowerShell" } | ForEach-Object {
-                $color = if ($_.State -eq "Published") { "Green" } else { "Yellow" }
-                Write-Host "$($_.Name)`t`t$($_.State)`t`t$($_.RunbookType)" -ForegroundColor $color
-            }
-        }
-        catch {
-            Write-Host "Could not verify runbooks: $($_.Exception.Message)" -ForegroundColor Red
-        }
+        Write-Host "All done!"
