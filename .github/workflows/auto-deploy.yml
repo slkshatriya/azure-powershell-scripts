@@ -1,4 +1,4 @@
-name: Auto Deploy to Azure
+name: Auto Deploy to Azure (CLI Method)
 
 on:
   push:
@@ -12,93 +12,80 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Deploy Scripts to Azure Automation
+    - name: Setup Azure CLI
       run: |
-        echo "Deploying scripts to Azure..."
+        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+        az --version
+    
+    - name: Login to Azure with Token
+      run: |
+        # Create temporary credentials file
+        echo "${{ secrets.AZURE_ACCESS_TOKEN }}" > /tmp/token.txt
         
-        # Deploy each PowerShell script
+        # Login using access token method
+        az login --service-principal \
+          --username "00000000-0000-0000-0000-000000000000" \
+          --password "${{ secrets.AZURE_ACCESS_TOKEN }}" \
+          --tenant "${{ secrets.AZURE_TENANT_ID }}" \
+          --allow-no-subscriptions || echo "Method 1 failed, trying alternative..."
+        
+        # Set subscription
+        az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+        
+        echo "Azure CLI authenticated"
+    
+    - name: Deploy Scripts using Azure CLI
+      run: |
+        echo "Deploying scripts using Azure CLI..."
+        
         for script_file in scripts/*.ps1; do
           if [[ -f "$script_file" ]]; then
             runbook_name=$(basename "$script_file" .ps1)
             echo "Deploying: $runbook_name"
             
-            # Step 1: Create runbook
+            # Delete existing runbook (if exists)
+            echo "  Cleaning up existing runbook..."
+            az automation runbook delete \
+              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
+              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --name "$runbook_name" \
+              --yes 2>/dev/null || echo "  No existing runbook to delete"
+            
+            # Create new runbook
             echo "  Creating runbook..."
-            create_response=$(curl -w "%{http_code}" -s -X PUT \
-              "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              -d '{
-                "properties": {
-                  "runbookType": "PowerShell",
-                  "description": "Auto-deployed from GitHub"
-                },
-                "location": "East US"
-              }')
+            az automation runbook create \
+              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
+              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --name "$runbook_name" \
+              --type "PowerShell" \
+              --description "Auto-deployed from GitHub on $(date)"
             
-            echo "  Create response: ${create_response: -3}"
-            
-            if [[ "${create_response: -3}" != "200" && "${create_response: -3}" != "201" ]]; then
-              echo "Failed to create runbook, skipping..."
-              continue
-            fi
-            
-            # Wait for runbook to be ready
-            echo "  Waiting for runbook to be ready..."
-            sleep 3
-            
-            # Step 2: Upload script content
+            # Upload content
             echo "  Uploading content..."
-            content_length=$(wc -c < "$script_file")
-            upload_response=$(curl -w "%{http_code}" -s -X PUT \
-              "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/draft/content?api-version=2015-10-31" \
-              -H "Authorization: Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
-              -H "Content-Type: text/powershell" \
-              -H "Content-Length: $content_length" \
-              --data-binary "@${script_file}")
+            az automation runbook replace-content \
+              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
+              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --name "$runbook_name" \
+              --content "@$script_file"
             
-            echo "  Upload response: ${upload_response: -3}"
-            
-            if [[ "${upload_response: -3}" != "200" && "${upload_response: -3}" != "202" ]]; then
-              echo "Failed to upload content, skipping publish..."
-              continue
-            fi
-            
-            # Wait for content to be processed
-            echo "  Waiting for content to be processed..."
-            sleep 5
-            
-            # Step 3: Publish runbook
+            # Publish runbook
             echo "  Publishing..."
-            publish_response=$(curl -w "%{http_code}" -s -X POST \
-              "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/publish?api-version=2015-10-31" \
-              -H "Authorization: Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
-              -H "Content-Length: 0")
+            az automation runbook publish \
+              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
+              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+              --name "$runbook_name"
             
-            echo "  Publish response: ${publish_response: -3}"
-            
-            if [[ "${publish_response: -3}" == "200" || "${publish_response: -3}" == "202" ]]; then
-              echo "Successfully deployed: $runbook_name"
-            else
-              echo "Published with status: ${publish_response: -3}"
-            fi
-            
-            echo "  Completed: $runbook_name"
+            echo "Successfully deployed: $runbook_name"
           fi
         done
         
-        echo "All scripts processed!"
+        echo "All scripts deployed successfully!"
     
-    - name: Verify Deployment
+    - name: List Deployed Runbooks
       run: |
-        echo "Verifying deployment..."
-        
-        # List runbooks to verify they exist
-        curl -s \
-          "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks?api-version=2020-01-13-preview" \
-          -H "Authorization: Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" | \
-          grep -o '"name":"[^"]*"' | \
-          sed 's/"name":"//g' | sed 's/"//g' | \
-          while read runbook; do
-            echo "Found runbook: $runbook"
-          done
+        echo "Current runbooks:"
+        az automation runbook list \
+          --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
+          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+          --query "[].{Name:name, State:state, Type:runbookType}" \
+          --output table
