@@ -1,31 +1,50 @@
 param(
-    [string]$InputMessage = "Hi",
-    [string]$Environment = "Production"
+    [string]$ComputerName,
+    #[string]$ServerName = $env:COMPUTERNAME,
+    [int]$ThresholdGB = 10
 )
 
-Write-Output "=== PowerShell Script Execution Started ==="
-Write-Output "Timestamp: $(Get-Date)"
-Write-Output "Input Message: $InputMessage"
-Write-Output "Environment: $Environment"
+# Micro Bot: Check Disk Space
+$healthData = @()
 
+#Write-Output "Checking disk space for server: $ComputerName"
 try {
-    
-    $processedData = $InputMessage.ToUpper()
-    
-    $result = @{
-        Status = "Success"
-        OriginalMessage = $InputMessage
-        ProcessedMessages = $processedData
-        ExecutionTime = Get-Date
-        Environments = $Environment
+    $diskInfo = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+        $freeSpaceGB = [math]::Round($_.FreeSpace / 1GB, 2)
+        $totalSpaceGB = [math]::Round($_.Size / 1GB, 2)
+        $usedSpaceGB = [math]::Round(($_.Size - $_.FreeSpace) / 1GB, 2)
+        $freeSpacePercent = [math]::Round(($_.FreeSpace / $_.Size) * 100, 2)
+        
+        $status = if ($freeSpaceGB -lt $ThresholdGB) { "CRITICAL" } else { "OK" }
+        
+        $healthData += [pscustomobject]@{
+            Server = $ComputerName
+            Category = "DiskSpace"
+            Item = "Drive $($_.DeviceID)"
+            Value = "$freeSpaceGB GB Free ($freeSpacePercent%)"
+            Status = $status
+            Details = "Total: $totalSpaceGB GB, Used: $usedSpaceGB GB, Free: $freeSpaceGB GB, Threshold: $ThresholdGB GB"
+            Time = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        }
+        
+        #Write-Output "Drive $($_.DeviceID): $freeSpaceGB GB free of $totalSpaceGB GB ($freeSpacePercent%) - $status"
     }
     
-    Write-Output "Processing completed successfully"
-    Write-Output "Result: $($result | ConvertTo-Json)"
+    # Return as JSON
+    $healthData | ConvertTo-Json -Depth 3
     
-    return $result
-}
-catch {
-    Write-Output "Error: $($_.Exception.Message)"
-    throw
+} catch {
+    $errorData = @([pscustomobject]@{
+        Server = $ComputerName
+        Category = "DiskSpace"
+        Item = "Error"
+        Value = "Failed to retrieve disk information"
+        Status = "ERROR"
+        Details = $_.Exception.Message
+        Time = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    })
+    
+    #Write-Output "ERROR: Failed to check disk space - $($_.Exception.Message)"
+    $errorData | ConvertTo-Json -Depth 3
+
 }
