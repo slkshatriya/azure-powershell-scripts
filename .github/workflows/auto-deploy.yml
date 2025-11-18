@@ -1,61 +1,116 @@
-name: Deploy with PowerShell (Most Reliable)
+name: Deploy to Azure (FINAL FIX)
 
 on:
   push:
     branches: [ main ]
     paths: [ 'scripts/**' ]
+  workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
     
-    - name: Deploy using PowerShell
-      shell: pwsh
+    - name: Complete Deployment (FIXED STATE HANDLING)
       run: |
-        Write-Host "🚀 Deploying with PowerShell..." -ForegroundColor Green
+        echo "🚀 FINAL SOLUTION - Proper State Handling..."
         
-        # Install required modules
-        Install-Module -Name Az.Automation -Force -Scope CurrentUser
-        Import-Module Az.Automation
+        TOKEN="${{ secrets.AZURE_ACCESS_TOKEN }}"
+        SUBSCRIPTION_ID="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+        RESOURCE_GROUP="${{ secrets.AZURE_RESOURCE_GROUP }}"
+        AUTOMATION_ACCOUNT="${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
         
-        $subscriptionId = "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-        $resourceGroup = "${{ secrets.AZURE_RESOURCE_GROUP }}"
-        $automationAccount = "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
-        $accessToken = "${{ secrets.AZURE_ACCESS_TOKEN }}"
-        
-        # Create auth context
-        $context = [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AzureRmProfileProvider]::Instance.Profile.DefaultContext
-        $context.Account.SetProperty("AccessToken", $accessToken)
-        
-        Get-ChildItem -Path "scripts/*.ps1" | ForEach-Object {
-            $runbookName = $_.BaseName
-            $scriptPath = $_.FullName
+        for script_file in scripts/*.ps1; do
+          if [[ -f "$script_file" ]]; then
+            runbook_name=$(basename "$script_file" .ps1)
+            echo "📦 Processing: $runbook_name"
             
-            Write-Host "📦 Processing: $runbookName" -ForegroundColor Yellow
+            # STEP 1: Delete existing runbook
+            echo "   🗑️ Cleaning up..."
+            curl -s -X DELETE \
+              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN"
+            sleep 3
             
-            try {
-                # Remove existing runbook
-                Write-Host "   🗑️ Removing existing..." -ForegroundColor Cyan
-                Remove-AzAutomationRunbook -AutomationAccountName $automationAccount -ResourceGroupName $resourceGroup -Name $runbookName -Force -ErrorAction SilentlyContinue
-                Start-Sleep 3
+            # STEP 2: Create runbook with DRAFT content immediately
+            echo "   🆕 Creating with content..."
+            
+            # Create runbook
+            curl -s -X PUT \
+              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"properties\": {
+                  \"runbookType\": \"PowerShell\",
+                  \"description\": \"GitHub deployed\",
+                  \"draft\": {
+                    \"inEdit\": true
+                  }
+                },
+                \"location\": \"East US\"
+              }"
+            sleep 3
+            
+            # STEP 3: Upload content to put it in Edit state
+            echo "   📤 Uploading content..."
+            curl -s -X PUT \
+              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name/draft/content?api-version=2015-10-31" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: text/powershell" \
+              --data-binary "@$script_file"
+            sleep 5
+            
+            # STEP 4: Check state before publishing
+            echo "   🔍 Checking state..."
+            state_response=$(curl -s \
+              "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN")
+            
+            current_state=$(echo "$state_response" | jq -r '.properties.state' 2>/dev/null || echo "Unknown")
+            echo "   📊 Current state: $current_state"
+            
+            # STEP 5: Publish only if in Edit state
+            if [[ "$current_state" == "Edit" ]]; then
+              echo "   📢 Publishing (state is Edit)..."
+              
+              publish_response=$(curl -s -w "%{http_code}" -X POST \
+                "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name/publish?api-version=2015-10-31" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Length: 0")
+              
+              publish_status="${publish_response: -3}"
+              echo "   Publish result: $publish_status"
+              
+              if [[ "$publish_status" == "200" || "$publish_status" == "202" ]]; then
+                echo "   🎉 PUBLISHED SUCCESSFULLY!"
                 
-                # Import new runbook
-                Write-Host "   📤 Importing new runbook..." -ForegroundColor Cyan
-                Import-AzAutomationRunbook -AutomationAccountName $automationAccount -ResourceGroupName $resourceGroup -Name $runbookName -Type PowerShell -Path $scriptPath -Description "GitHub deployed"
-                Start-Sleep 5
+                # Verify published state
+                sleep 3
+                final_check=$(curl -s \
+                  "https://management.azure.com/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Automation/automationAccounts/$AUTOMATION_ACCOUNT/runbooks/$runbook_name?api-version=2020-01-13-preview" \
+                  -H "Authorization: Bearer $TOKEN")
                 
-                # Publish runbook
-                Write-Host "   📢 Publishing..." -ForegroundColor Cyan
-                Publish-AzAutomationRunbook -AutomationAccountName $automationAccount -ResourceGroupName $resourceGroup -Name $runbookName
+                final_state=$(echo "$final_check" | jq -r '.properties.state' 2>/dev/null || echo "Unknown")
+                echo "   ✅ FINAL STATE: $final_state"
                 
-                Write-Host "   ✅ SUCCESS: $runbookName is published!" -ForegroundColor Green
-            }
-            catch {
-                Write-Host "   ❌ ERROR: $($_.Exception.Message)" -ForegroundColor Red
-            }
-        }
+                if [[ "$final_state" == "Published" ]]; then
+                  echo "   🚀 SUCCESS: $runbook_name is LIVE and ready for Logic App!"
+                fi
+              else
+                echo "   ❌ Publish failed with status: $publish_status"
+              fi
+            else
+              echo "   ⚠️ Cannot publish - state is $current_state (need Edit state)"
+              echo "   📋 Manual publish required in Azure Portal"
+            fi
+            
+            echo ""
+          fi
+        done
         
-        Write-Host "🎉 Deployment completed!" -ForegroundColor Green
+        echo "🎯 Deployment completed!"
+        echo "📋 Verify in Azure Portal: Automation Accounts → $AUTOMATION_ACCOUNT → Runbooks"
