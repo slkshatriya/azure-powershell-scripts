@@ -1,4 +1,4 @@
-name: Deploy Scripts (Working REST API Solution)
+name: Deploy Scripts (Mimicking Manual Process)
 
 on:
   push:
@@ -13,9 +13,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Deploy and Publish Scripts
+    - name: Deploy Scripts (Manual Process Via API)
       run: |
-        echo "🚀 Deploying scripts using REST API (your token works!)..."
+        echo "🚀 Deploying scripts by mimicking manual Azure Portal process..."
         
         TOKEN="${{ secrets.AZURE_ACCESS_TOKEN }}"
         SUB="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
@@ -24,158 +24,95 @@ jobs:
         
         BASE_URL="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Automation/automationAccounts/$AA"
         
-        total=0
-        published=0
-        
         for script in scripts/*.ps1; do
           if [[ -f "$script" ]]; then
-            total=$((total + 1))
             name=$(basename "$script" .ps1)
             echo ""
-            echo "📦 [$total] Processing: $name"
+            echo "📦 Processing: $name"
             
-            # Delete existing
-            echo "   🗑️ Cleaning up..."
+            # Step 1: Delete existing runbook completely
+            echo "   🗑️ Deleting existing runbook..."
             curl -s -X DELETE "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
               -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1
-            sleep 2
+            sleep 3
             
-            # Create runbook
-            echo "   🆕 Creating runbook..."
-            create_response=$(curl -s -w "%{response_code}%{http_code}" -X PUT \
-              "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
+            # Step 2: Create runbook (starts in "New" state)
+            echo "   🆕 Creating new runbook..."
+            curl -s -X PUT "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: application/json" \
               -d '{
                 "properties": {
-                  "runbookType": "PowerShell", 
+                  "runbookType": "PowerShell",
                   "description": "GitHub Auto-Deploy"
                 },
                 "location": "East US"
-              }')
+              }' >/dev/null
+            sleep 5
             
-            create_status="${create_response: -3}"
-            if [[ "$create_status" =~ ^(200|201)$ ]]; then
-              echo "   ✅ Runbook created successfully"
-            else
-              echo "   ❌ Create failed: HTTP $create_status"
-              continue
-            fi
-            sleep 3
-            
-            # Upload content
-            echo "   📤 Uploading script..."
-            upload_response=$(curl -s -w "%{http_code}" -X PUT \
-              "$BASE_URL/runbooks/$name/draft/content?api-version=2015-10-31" \
+            # Step 3: Upload content to draft (this should move it to "Edit" state)
+            echo "   📝 Opening editor and adding content..."
+            curl -s -X PUT "$BASE_URL/runbooks/$name/draft/content?api-version=2015-10-31" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Content-Type: text/powershell" \
-              --data-binary "@$script")
+              --data-binary "@$script" >/dev/null
+            sleep 3
             
-            upload_status="${upload_response: -3}"
-            if [[ "$upload_status" =~ ^(200|202)$ ]]; then
-              echo "   ✅ Content uploaded successfully"
-            else
-              echo "   ❌ Upload failed: HTTP $upload_status"
-              continue
-            fi
-            sleep 8
+            # Step 4: CRITICAL - Simulate "Save" action to force Edit state
+            echo "   💾 Saving draft (forcing Edit state)..."
+            curl -s -X PUT "$BASE_URL/runbooks/$name/draft?api-version=2015-10-31" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "properties": {
+                  "description": "Draft saved from GitHub",
+                  "logVerbose": false,
+                  "logProgress": false
+                }
+              }' >/dev/null 2>&1
+            sleep 5
             
-            # Check if we can publish (try to get current state)
-            echo "   🔍 Checking readiness..."
+            # Step 5: Force update runbook properties to trigger Edit state
+            echo "   🔄 Updating runbook properties..."
+            curl -s -X PATCH "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "properties": {
+                  "description": "Ready for publish - GitHub deployed"
+                }
+              }' >/dev/null
+            sleep 3
+            
+            # Step 6: Check state after all operations
+            echo "   🔍 Checking state after preparation..."
             state_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
               -H "Authorization: Bearer $TOKEN")
-            
-            current_state=$(echo "$state_response" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+            current_state=$(echo "$state_response" | grep -o '"state":"[^"]*"' | cut -d'"' -f4)
             echo "   📊 Current state: $current_state"
             
-            # Multiple publish attempts
-            echo "   📢 Publishing runbook..."
-            publish_success=false
-            
-            for attempt in 1 2 3 4 5; do
-              echo "   🔄 Attempt $attempt/5..."
+            # Step 7: If still "New", try alternative approach
+            if [[ "$current_state" == "New" ]]; then
+              echo "   🔧 Still in New state, trying alternative approach..."
               
-              publish_response=$(curl -s -w "%{http_code}" -X POST \
-                "$BASE_URL/runbooks/$name/publish?api-version=2015-10-31" \
+              # Try to create a test job to force state change
+              curl -s -X PUT "$BASE_URL/runbooks/$name/draft/testJob?api-version=2015-10-31" \
                 -H "Authorization: Bearer $TOKEN" \
-                -H "Content-Length: 0")
+                -H "Content-Type: application/json" \
+                -d '{"properties": {"parameters": {}}}' >/dev/null 2>&1
+              sleep 2
               
-              publish_status="${publish_response: -3}"
+              # Cancel the test job immediately
+              curl -s -X POST "$BASE_URL/runbooks/$name/draft/testJob/stop?api-version=2015-10-31" \
+                -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1
+              sleep 3
               
-              if [[ "$publish_status" =~ ^(200|202)$ ]]; then
-                echo "   🎉 PUBLISHED SUCCESSFULLY!"
-                publish_success=true
-                published=$((published + 1))
-                break
-              elif [[ "$publish_status" == "404" ]]; then
-                echo "   ⚠️ Not ready yet, waiting..."
-                sleep 15
-              else
-                echo "   ⚠️ HTTP $publish_status, waiting..."
-                sleep 10
-              fi
-            done
-            
-            if [[ "$publish_success" == false ]]; then
-              echo "   ❌ Auto-publish failed after 5 attempts"
+              # Check state again
+              state_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
+                -H "Authorization: Bearer $TOKEN")
+              current_state=$(echo "$state_response" | grep -o '"state":"[^"]*"' | cut -d'"' -f4)
+              echo "   📊 State after test job: $current_state"
             fi
             
-            # Final verification
-            echo "   🔍 Final check..."
-            sleep 3
-            final_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
-              -H "Authorization: Bearer $TOKEN")
-            final_state=$(echo "$final_response" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
-            
-            case "$final_state" in
-              "Published")
-                echo "   ✅ SUCCESS: $name is LIVE and ready for Logic App!"
-                ;;
-              "Edit"|"New")
-                echo "   📋 UPLOADED: $name ready for manual publish"
-                ;;
-              *)
-                echo "   ❓ State: $final_state"
-                ;;
-            esac
-          fi
-        done
-        
-        echo ""
-        echo "🎯 ===== FINAL SUMMARY ====="
-        echo "📁 Total scripts: $total"
-        echo "🎉 Auto-published: $published"
-        echo "📋 Need manual publish: $((total - published))"
-        
-        if [[ $published -eq $total && $total -gt 0 ]]; then
-          echo ""
-          echo "🎊 PERFECT! ALL SCRIPTS ARE LIVE!"
-          echo "🚀 Your Logic App can use them immediately!"
-        elif [[ $published -gt 0 ]]; then
-          echo ""
-          echo "✅ PARTIAL SUCCESS: $published/$total scripts are live!"
-        else
-          echo ""
-          echo "📤 All scripts uploaded successfully!"
-          echo "📋 Manual publish needed: Portal → Automation → Runbooks"
-        fi
-        
-        echo ""
-        echo "🔗 Azure Portal: https://portal.azure.com"
-        echo "📂 Path: Automation Accounts → $AA → Runbooks"
-    
-    - name: List Current Runbooks
-      run: |
-        echo "📋 Verification - Current runbook states:"
-        
-        curl -s "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks?api-version=2020-01-13-preview" \
-          -H "Authorization: Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" | \
-          sed -n 's/.*"name":"\([^"]*\)".*"state":"\([^"]*\)".*/\1: \2/p' | \
-          grep -v "AzureAutomation" | \
-          while read line; do
-            if echo "$line" | grep -q "Published"; then
-              echo "✅ $line"
-            else
-              echo "⚠️ $line"
-            fi
-          done
+            # Step 8: Try to publish regardless of state
+            echo "   📢 Attempting to publish..."
