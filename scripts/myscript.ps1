@@ -1,5 +1,5 @@
 param(
-    [string]$InputMessage = "Hi",
+    [string]$InputMessage = "Hello",
     [string]$Environment = "Prod"
 )
 
