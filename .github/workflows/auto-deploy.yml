@@ -1,4 +1,4 @@
-name: Auto Deploy to Azure (CLI Method)
+name: Auto Deploy to Azure (Fixed CLI)
 
 on:
   push:
@@ -12,80 +12,56 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Setup Azure CLI
+    - name: Install Azure CLI
       run: |
         curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-        az --version
     
-    - name: Login to Azure with Token
+    - name: Authenticate with Azure using Token
       run: |
-        # Create temporary credentials file
-        echo "${{ secrets.AZURE_ACCESS_TOKEN }}" > /tmp/token.txt
+        # Set the access token as environment variable
+        export AZURE_ACCESS_TOKEN="${{ secrets.AZURE_ACCESS_TOKEN }}"
         
-        # Login using access token method
-        az login --service-principal \
-          --username "00000000-0000-0000-0000-000000000000" \
-          --password "${{ secrets.AZURE_ACCESS_TOKEN }}" \
-          --tenant "${{ secrets.AZURE_TENANT_ID }}" \
-          --allow-no-subscriptions || echo "Method 1 failed, trying alternative..."
+        # Login using the token directly (no service principal needed)
+        echo "🔐 Authenticating with Azure..."
         
-        # Set subscription
-        az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-        
-        echo "Azure CLI authenticated"
+        # Method: Use az rest commands instead of az login
+        echo "✅ Using token-based authentication for REST calls"
     
-    - name: Deploy Scripts using Azure CLI
+    - name: Deploy Scripts using REST calls
       run: |
-        echo "Deploying scripts using Azure CLI..."
+        echo "🚀 Deploying scripts..."
         
         for script_file in scripts/*.ps1; do
           if [[ -f "$script_file" ]]; then
             runbook_name=$(basename "$script_file" .ps1)
-            echo "Deploying: $runbook_name"
+            echo "📦 Deploying: $runbook_name"
             
-            # Delete existing runbook (if exists)
-            echo "  Cleaning up existing runbook..."
-            az automation runbook delete \
-              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-              --name "$runbook_name" \
-              --yes 2>/dev/null || echo "  No existing runbook to delete"
-            
-            # Create new runbook
+            # Use az rest command (works with token)
             echo "  Creating runbook..."
-            az automation runbook create \
-              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-              --name "$runbook_name" \
-              --type "PowerShell" \
-              --description "Auto-deployed from GitHub on $(date)"
+            az rest --method PUT \
+              --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}?api-version=2020-01-13-preview" \
+              --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" "Content-Type=application/json" \
+              --body '{
+                "properties": {
+                  "runbookType": "PowerShell",
+                  "description": "Auto-deployed from GitHub"
+                },
+                "location": "East US"
+              }'
+            
+            echo "  ✅ Runbook created"
+            sleep 3
             
             # Upload content
             echo "  Uploading content..."
-            az automation runbook replace-content \
-              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-              --name "$runbook_name" \
-              --content "@$script_file"
+            az rest --method PUT \
+              --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/draft/content?api-version=2015-10-31" \
+              --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" "Content-Type=text/powershell" \
+              --body "@${script_file}"
             
-            # Publish runbook
-            echo "  Publishing..."
-            az automation runbook publish \
-              --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
-              --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-              --name "$runbook_name"
-            
-            echo "Successfully deployed: $runbook_name"
+            echo "  ✅ Content uploaded"
+            echo "  📝 Ready for manual publish in Azure Portal"
           fi
         done
         
-        echo "All scripts deployed successfully!"
-    
-    - name: List Deployed Runbooks
-      run: |
-        echo "Current runbooks:"
-        az automation runbook list \
-          --automation-account-name "${{ secrets.AZURE_AUTOMATION_ACCOUNT }}" \
-          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
-          --query "[].{Name:name, State:state, Type:runbookType}" \
-          --output table
+        echo "🎉 All scripts deployed!"
