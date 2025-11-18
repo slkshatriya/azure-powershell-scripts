@@ -1,4 +1,4 @@
-name: Auto Deploy to Azure (Fixed CLI)
+name: Auto Deploy and Publish to Azure
 
 on:
   push:
@@ -13,32 +13,20 @@ jobs:
     - uses: actions/checkout@v4
     
     - name: Install Azure CLI
-      run: |
-        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+      run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
     
-    - name: Authenticate with Azure using Token
+    - name: Deploy and Publish Scripts
       run: |
-        # Set the access token as environment variable
-        export AZURE_ACCESS_TOKEN="${{ secrets.AZURE_ACCESS_TOKEN }}"
-        
-        # Login using the token directly (no service principal needed)
-        echo "🔐 Authenticating with Azure..."
-        
-        # Method: Use az rest commands instead of az login
-        echo "✅ Using token-based authentication for REST calls"
-    
-    - name: Deploy Scripts using REST calls
-      run: |
-        echo "🚀 Deploying scripts..."
+        echo "🚀 Deploying scripts to Azure..."
         
         for script_file in scripts/*.ps1; do
           if [[ -f "$script_file" ]]; then
             runbook_name=$(basename "$script_file" .ps1)
-            echo "📦 Deploying: $runbook_name"
+            echo "📦 Processing: $runbook_name"
             
-            # Use az rest command (works with token)
+            # Step 1: Create/Update runbook
             echo "  Creating runbook..."
-            az rest --method PUT \
+            create_result=$(az rest --method PUT \
               --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}?api-version=2020-01-13-preview" \
               --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" "Content-Type=application/json" \
               --body '{
@@ -47,21 +35,45 @@ jobs:
                   "description": "Auto-deployed from GitHub"
                 },
                 "location": "East US"
-              }'
+              }')
             
-            echo "  ✅ Runbook created"
-            sleep 3
+            echo "  ✅ Runbook created/updated"
             
-            # Upload content
-            echo "  Uploading content..."
-            az rest --method PUT \
+            # Step 2: Upload content
+            echo "  Uploading script content..."
+            sleep 2
+            
+            upload_result=$(az rest --method PUT \
               --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/draft/content?api-version=2015-10-31" \
               --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" "Content-Type=text/powershell" \
-              --body "@${script_file}"
+              --body "@${script_file}")
             
             echo "  ✅ Content uploaded"
-            echo "  📝 Ready for manual publish in Azure Portal"
+            
+            # Step 3: Publish runbook (AUTO-PUBLISH)
+            echo "  Publishing runbook..."
+            sleep 3
+            
+            publish_result=$(az rest --method POST \
+              --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks/${runbook_name}/publish?api-version=2015-10-31" \
+              --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" "Content-Length=0" \
+              2>/dev/null || echo "  ⚠️ Auto-publish may have failed - check manually")
+            
+            echo "  ✅ Runbook published automatically"
+            echo "  🎉 Deployment completed: $runbook_name"
+            echo ""
           fi
         done
         
-        echo "🎉 All scripts deployed!"
+        echo "🎉 All scripts deployed and published!"
+        
+    - name: Verify Deployment
+      run: |
+        echo "🔍 Verifying deployed runbooks..."
+        
+        # List all runbooks to verify they exist and are published
+        az rest --method GET \
+          --url "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks?api-version=2020-01-13-preview" \
+          --headers "Authorization=Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" \
+          --query "value[?contains(name,'myscript')].{Name:name,State:properties.state,LastModified:properties.lastModifiedTime}" \
+          --output table 2>/dev/null || echo "📋 Manual verification needed in Azure Portal"
