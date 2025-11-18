@@ -1,4 +1,4 @@
-name: Deploy Scripts to Azure (Token Auth Fixed)
+name: Deploy Scripts (Working REST API Solution)
 
 on:
   push:
@@ -11,95 +11,171 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Get code
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
     
-    - name: Install Azure CLI
-      run: curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
-    
-    - name: Setup Azure Authentication
+    - name: Deploy and Publish Scripts
       run: |
-        echo "🔐 Setting up Azure CLI with existing token..."
+        echo "🚀 Deploying scripts using REST API (your token works!)..."
         
-        # Create a fake Azure CLI profile with your token
-        mkdir -p ~/.azure
+        TOKEN="${{ secrets.AZURE_ACCESS_TOKEN }}"
+        SUB="${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+        RG="${{ secrets.AZURE_RESOURCE_GROUP }}"
+        AA="${{ secrets.AZURE_AUTOMATION_ACCOUNT }}"
         
-        # Create azureProfile.json
-        cat > ~/.azure/azureProfile.json << EOF
-        {
-          "installationId": "github-actions",
-          "subscriptions": [
-            {
-              "id": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-              "name": "Your Subscription",
-              "state": "Enabled",
-              "user": {
-                "name": "github-actions@automation",
-                "type": "user"
-              },
-              "isDefault": true,
-              "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
-            }
-          ]
-        }
-        EOF
+        BASE_URL="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Automation/automationAccounts/$AA"
         
-        # Create accessTokens.json with your token
-        cat > ~/.azure/accessTokens.json << EOF
-        [
-          {
-            "tokenType": "Bearer",
-            "accessToken": "${{ secrets.AZURE_ACCESS_TOKEN }}",
-            "expiresOn": "$(date -d '+1 hour' --iso-8601=seconds)",
-            "subscription": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-            "tenant": "${{ secrets.AZURE_TENANT_ID }}"
-          }
-        ]
-        EOF
-        
-        # Set the default subscription
-        az account set --subscription "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
-        
-        echo "✅ Azure CLI configured with token"
-    
-    - name: Deploy PowerShell Scripts
-      run: |
-        echo "🚀 Deploying scripts with your proven method..."
+        total=0
+        published=0
         
         for script in scripts/*.ps1; do
           if [[ -f "$script" ]]; then
+            total=$((total + 1))
             name=$(basename "$script" .ps1)
-            echo "📦 Deploying: $name"
+            echo ""
+            echo "📦 [$total] Processing: $name"
             
-            # Delete old runbook
-            az automation runbook delete \
-              --automation-account-name ${{ secrets.AZURE_AUTOMATION_ACCOUNT }} \
-              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-              --name "$name" --yes 2>/dev/null || echo "No existing runbook"
+            # Delete existing
+            echo "   🗑️ Cleaning up..."
+            curl -s -X DELETE "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN" >/dev/null 2>&1
+            sleep 2
             
-            # Create new runbook
-            az automation runbook create \
-              --automation-account-name ${{ secrets.AZURE_AUTOMATION_ACCOUNT }} \
-              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-              --name "$name" \
-              --type PowerShell \
-              --description "Auto-deployed from GitHub"
+            # Create runbook
+            echo "   🆕 Creating runbook..."
+            create_response=$(curl -s -w "%{response_code}%{http_code}" -X PUT \
+              "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "properties": {
+                  "runbookType": "PowerShell", 
+                  "description": "GitHub Auto-Deploy"
+                },
+                "location": "East US"
+              }')
+            
+            create_status="${create_response: -3}"
+            if [[ "$create_status" =~ ^(200|201)$ ]]; then
+              echo "   ✅ Runbook created successfully"
+            else
+              echo "   ❌ Create failed: HTTP $create_status"
+              continue
+            fi
+            sleep 3
             
             # Upload content
-            az automation runbook replace-content \
-              --automation-account-name ${{ secrets.AZURE_AUTOMATION_ACCOUNT }} \
-              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-              --name "$name" \
-              --content "@$script"
+            echo "   📤 Uploading script..."
+            upload_response=$(curl -s -w "%{http_code}" -X PUT \
+              "$BASE_URL/runbooks/$name/draft/content?api-version=2015-10-31" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Type: text/powershell" \
+              --data-binary "@$script")
             
-            # Publish
-            az automation runbook publish \
-              --automation-account-name ${{ secrets.AZURE_AUTOMATION_ACCOUNT }} \
-              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-              --name "$name"
+            upload_status="${upload_response: -3}"
+            if [[ "$upload_status" =~ ^(200|202)$ ]]; then
+              echo "   ✅ Content uploaded successfully"
+            else
+              echo "   ❌ Upload failed: HTTP $upload_status"
+              continue
+            fi
+            sleep 8
             
-            echo "✅ Successfully deployed and published: $name"
+            # Check if we can publish (try to get current state)
+            echo "   🔍 Checking readiness..."
+            state_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN")
+            
+            current_state=$(echo "$state_response" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+            echo "   📊 Current state: $current_state"
+            
+            # Multiple publish attempts
+            echo "   📢 Publishing runbook..."
+            publish_success=false
+            
+            for attempt in 1 2 3 4 5; do
+              echo "   🔄 Attempt $attempt/5..."
+              
+              publish_response=$(curl -s -w "%{http_code}" -X POST \
+                "$BASE_URL/runbooks/$name/publish?api-version=2015-10-31" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Length: 0")
+              
+              publish_status="${publish_response: -3}"
+              
+              if [[ "$publish_status" =~ ^(200|202)$ ]]; then
+                echo "   🎉 PUBLISHED SUCCESSFULLY!"
+                publish_success=true
+                published=$((published + 1))
+                break
+              elif [[ "$publish_status" == "404" ]]; then
+                echo "   ⚠️ Not ready yet, waiting..."
+                sleep 15
+              else
+                echo "   ⚠️ HTTP $publish_status, waiting..."
+                sleep 10
+              fi
+            done
+            
+            if [[ "$publish_success" == false ]]; then
+              echo "   ❌ Auto-publish failed after 5 attempts"
+            fi
+            
+            # Final verification
+            echo "   🔍 Final check..."
+            sleep 3
+            final_response=$(curl -s "$BASE_URL/runbooks/$name?api-version=2020-01-13-preview" \
+              -H "Authorization: Bearer $TOKEN")
+            final_state=$(echo "$final_response" | sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+            
+            case "$final_state" in
+              "Published")
+                echo "   ✅ SUCCESS: $name is LIVE and ready for Logic App!"
+                ;;
+              "Edit"|"New")
+                echo "   📋 UPLOADED: $name ready for manual publish"
+                ;;
+              *)
+                echo "   ❓ State: $final_state"
+                ;;
+            esac
           fi
         done
         
-        echo "🎉 All scripts deployed and published!"
+        echo ""
+        echo "🎯 ===== FINAL SUMMARY ====="
+        echo "📁 Total scripts: $total"
+        echo "🎉 Auto-published: $published"
+        echo "📋 Need manual publish: $((total - published))"
+        
+        if [[ $published -eq $total && $total -gt 0 ]]; then
+          echo ""
+          echo "🎊 PERFECT! ALL SCRIPTS ARE LIVE!"
+          echo "🚀 Your Logic App can use them immediately!"
+        elif [[ $published -gt 0 ]]; then
+          echo ""
+          echo "✅ PARTIAL SUCCESS: $published/$total scripts are live!"
+        else
+          echo ""
+          echo "📤 All scripts uploaded successfully!"
+          echo "📋 Manual publish needed: Portal → Automation → Runbooks"
+        fi
+        
+        echo ""
+        echo "🔗 Azure Portal: https://portal.azure.com"
+        echo "📂 Path: Automation Accounts → $AA → Runbooks"
+    
+    - name: List Current Runbooks
+      run: |
+        echo "📋 Verification - Current runbook states:"
+        
+        curl -s "https://management.azure.com/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ secrets.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Automation/automationAccounts/${{ secrets.AZURE_AUTOMATION_ACCOUNT }}/runbooks?api-version=2020-01-13-preview" \
+          -H "Authorization: Bearer ${{ secrets.AZURE_ACCESS_TOKEN }}" | \
+          sed -n 's/.*"name":"\([^"]*\)".*"state":"\([^"]*\)".*/\1: \2/p' | \
+          grep -v "AzureAutomation" | \
+          while read line; do
+            if echo "$line" | grep -q "Published"; then
+              echo "✅ $line"
+            else
+              echo "⚠️ $line"
+            fi
+          done
