@@ -21,7 +21,7 @@ try {
             Server = $ComputerName
             Category = "DiskSpace"
             Item = "Drive $($_.DeviceID)"
-            Value = "$freeSpaceGB GB Free ($freeSpacePercent%)"
+            Values = "$freeSpaceGB GB Free ($freeSpacePercent%)"
             Status = $status
             Details = "Total: $totalSpaceGB GB, Used: $usedSpaceGB GB, Free: $freeSpaceGB GB, Threshold: $ThresholdGB GB"
             Time = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
